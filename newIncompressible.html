@@ -1,0 +1,498 @@
+<!DOCTYPE html><html>
+<body style=background-color:darkgrey; >
+<center><canvas id="canvas" style="background-color:indigo;" width=1024 height=512></canvas><br/><div id="inu"></div><div id="fps"></div>
+</center>
+<g>
+<form onchange="F.renderMode=event.target.id">
+Ce qui est montré : <br/>
+  <input type="radio" id="curl" value="curl" name="renderMode">
+  <label for="curl">rotationnel</label><br>
+  <input type="radio" id="vit" value="vit" name="renderMode">
+  <label for="vit">vitesse</label><br>
+  <input type="radio" id="ink" value="ink" name="renderMode" checked=true>
+  <label for="ink">encre</label>
+  <input type="radio" id="pression" value="pression" name="renderMode">
+  <label for="pression">pression</label>
+</form> 
+</g>
+<script>
+//https://www.youtube.com/watch?v=iKAVRgIrUOU
+let mouseDown=0
+document.onmousedown=e=>{mouseDown=1}
+document.onmouseup=e=>{mouseDown=0}
+let mouse={x:0,y:0}
+let lastMouse={x:0,y:0}
+document.onmousemove=mm
+function mm(e){
+	lastMouse=copy(mouse)
+	mouse=getMousePos(document.getElementById("canvas"),e)
+	mouse.y=gl.canvas.height-mouse.y
+}
+function getMousePos(canvas, evt) {
+    var rect = canvas.getBoundingClientRect();
+    return {
+        x: Math.round((evt.clientX - rect.left) / (rect.right - rect.left) * canvas.width),
+        y: Math.round((evt.clientY - rect.top) / (rect.bottom - rect.top) * canvas.height)
+    };
+}
+
+let keysDown={}
+document.onkeydown=e=>{keysDown[e.key]=1;if(e.key=="x" && (go=!go)) main()}
+document.onkeyup=e=>{keysDown[e.key]=undefined}
+function copy(e){return JSON.parse(JSON.stringify(e))}
+const vs=`#version 300 es
+in vec4 pos;
+void main(){
+	gl_Position=pos;
+}`
+const canvas=document.getElementById("canvas")
+const gl=canvas.getContext("webgl2")
+gl.getExtension('EXT_color_buffer_float');//pour pouvoir render des textures float IMPORTANT c'était dur à trouver
+const globalFramebuffer=gl.createFramebuffer()
+const globalVertex=createShader(gl, gl.VERTEX_SHADER, vs);
+const gposBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, gposBuffer);
+const globalPos=[		-1, -1,		-1, 1,		1, 1,		-1,-1,		1,1,		1,-1];
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(globalPos), gl.STATIC_DRAW);
+
+
+const width=1000
+const height=400
+document.getElementById("canvas").setAttribute("width",width)
+document.getElementById("canvas").setAttribute("height",height)
+
+
+function createShader(gl, type, source) {
+  var shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  var success = gl.getShaderParameter(shader, gl.COMPILE_STATUS);
+  if (success) return shader;
+  console.log(gl.getShaderInfoLog(shader));  // eslint-disable-line
+  gl.deleteShader(shader);
+  return undefined;
+}
+function createProgram(gl, vertexShader, fragmentShader) {
+  var program = gl.createProgram();
+  gl.attachShader(program, vertexShader);
+  gl.attachShader(program, fragmentShader);
+  gl.linkProgram(program);
+  var success = gl.getProgramParameter(program, gl.LINK_STATUS);
+  if (success) return program;
+  console.log(gl.getProgramInfoLog(program));  // eslint-disable-line
+  gl.deleteProgram(program);
+  return undefined;
+}
+function createTex(w,h,internalFormat=gl.R16F,format=gl.RED,type=gl.FLOAT){//combinaisons : https://www.khronos.org/registry/webgl/specs/latest/2.0/#TEXTURE_TYPES_FORMATS_FROM_DOM_ELEMENTS_TABLE
+	let tex=gl.createTexture()
+	gl.bindTexture(gl.TEXTURE_2D,tex)
+	gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat,w, h, 0,format, type, null);
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+	return tex
+}
+class Action{// action Fragment shader
+/*note avant d'utliser ces modules : 
+- attention aux précisions des textures (defaut float16, chcngeable dans Tex.args)
+- attention aux précisions dans les shaders (defaut lowp float, changeable dans les arguments de Action.constructor)
+- precision sur le systeme cache/target : si pas besoin de render une texture sur elle-meme, donner self=0 dans la création de new Tex()
+
+*/
+	constructor(fs,args,prec="lowp"){//ex args : ["sampler2D tex1","sampler2D tex2", "float inu","sampler2D self"]
+		this.args={}
+		this.nargs=args.length
+		for(let i=0;i<args.length;i++) this.args[args[i].split(" ")[1]]=args[i].split(" ")[0]
+		this.fs="#version 300 es\nprecision "+prec+" float;\n"+fs
+		console.log(this.fs)
+		this.fragmentShader=createShader(gl,gl.FRAGMENT_SHADER,this.fs)
+		this.prog=createProgram(gl,globalVertex,this.fragmentShader);
+		this.posLocation=gl.getAttribLocation(this.prog,"pos")
+		this.uniLoc={}
+		for(let i in this.args){
+			this.uniLoc[i]=gl.getUniformLocation(this.prog,i)
+			if(this.uniLoc[i]===null) console.warn("anntention null uniform location (peut indiquer qu'il n'est pas utilisé dans le shader) : ",i)
+		}
+	}
+	apply(target,args,toCanvas=false){//target : une Tex avec un framebuffer ==== {width:int,height:int,target:glTEXTURE2D}
+		gl.enableVertexAttribArray(this.posLocation);
+		gl.vertexAttribPointer(this.posLocation, 2, gl.FLOAT, false, 0,0);
+		gl.viewport(0, 0, toCanvas?gl.canvas.width:target.width, toCanvas?gl.canvas.height:target.height);
+		gl.useProgram(this.prog);
+		//set args
+		let nTex=0
+		for(let i in this.args){
+			if(args[i]===undefined)console.warn("argument missing : ",i)
+		
+			let curtype=this.args[i]
+			if(curtype=="int[]"){   
+				gl.uniform1iv(this.uniLoc[i],args[i])
+			}else if(curtype=="mat4[]"){
+				gl.uniformMatrix4fv(this.uniLoc[i],false,args[i])
+			}else if(curtype=="mat3[]"){
+				gl.uniformMatrix3fv(this.uniLoc[i],false,args[i])
+			}else if(curtype=="vec3[]"){
+				gl.uniform3fv(this.uniLoc[i],args[i])
+			}else if(curtype=="float[]"){
+				gl.uniform1fv(this.uniLoc[i],args[i])
+			}else if(this.args[i]=="sampler2D" || this.args[i]=="isampler2D"){
+				gl.activeTexture(gl.TEXTURE0+nTex)
+				if(!args[i].cache) throw "pas bon argument "+i
+				gl.bindTexture(gl.TEXTURE_2D, args[i].cache);
+				gl.uniform1i(this.uniLoc[i], nTex);
+				nTex++
+			}else if(this.args[i]=="float"){
+				gl.uniform1f(this.uniLoc[i],args[i])
+			}else if(this.args[i]=="ivec2"){//pour les dims
+				gl.uniform2i(this.uniLoc[i],args[i][0],args[i][1])
+			}else if(this.args[i]=="vec2"){
+				gl.uniform2f(this.uniLoc[i],args[i][0],args[i][1])
+			}else if(this.args[i]=="vec3"){
+				gl.uniform3f(this.uniLoc[i],args[i][0],args[i][1],args[i][2])
+			}else if(this.args[i]=="ivec3"){
+				gl.uniform3i(this.uniLoc[i],args[i][0],args[i][1],args[i][2])
+			}else if(this.args[i]=="int"){
+				gl.uniform1i(this.uniLoc[i],args[i])
+			}else if(this.args[i]=="mat4"){
+				gl.uniformMatrix4fv(this.uniLoc[i],false,args[i])////DOIT ETRE UNE LISTE DE FLOAT DE 4*4 CASES
+			}else if(this.args[i]=="mat3"){
+				gl.uniformMatrix3fv(this.uniLoc[i],false,args[i])////DOIT ETRE UNE LISTE DE FLOAT DE 4*4 CASES
+			}else{
+				throw "type pas connu "+this.args[i]
+			}
+		}
+		gl.bindFramebuffer(gl.FRAMEBUFFER,toCanvas?null:globalFramebuffer)
+		if(!toCanvas) gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, target.target, 0);//ATTENTION LE TARGET DOIT AVOIR UNE PROPRIETE target POUR LA CIBLE.
+		if(toCanvas){
+			gl.clearColor(0,0,0, 1);   // clear to black
+			gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+		}else{
+			gl.clearColor(0, 0, 0, 0);
+			gl.clear(gl.COLOR_BUFFER_BIT);
+		}
+		gl.drawArrays(gl.TRIANGLES, 0, 6);
+		
+		if(!toCanvas && target.isClassTex && target.self) target.mt=1-target.mt
+
+	}
+}
+class Tex{
+	static args=[-1,{internalFormat:gl.R16F,format:gl.RED,type:gl.HALF_FLOAT},{internalFormat:gl.RG16F,format:gl.RG,type:gl.HALF_FLOAT},{internalFormat:gl.RGBA16F,format:gl.RGBA,type:gl.HALF_FLOAT}]
+	constructor(dim=1,self=1,w=width,h=height){///SELF : 1 si on peut auto-render sinon 0 pour opti ; HALF:1 si float16 au l
+		this.width=w
+		this.height=h
+		this.dim=dim
+		this.isClassTex=1
+		this.self=self
+		this.tex=this.self?[createTex(w,h,Tex.args[dim].internalFormat,Tex.args[dim].format,Tex.args[dim].type),createTex(w,h,Tex.args[dim].internalFormat,Tex.args[dim].format,Tex.args[dim].type)]:createTex(w,h,Tex.args[dim].internalFormat,Tex.args[dim].format,Tex.args[dim].type)
+		this.mt=0
+		this.renderSansSwitch=0
+	}
+	get target(){///faux : sur lequel on render
+		//if(this.renderSansSwitch++>1) console.warn("attention ptet que t'as pas switch "+this.renderSansSwitch)
+		return this.self?this.tex[this.mt]:this.tex;
+	}
+	get cache(){return this.self?this.tex[1-this.mt]:this.tex}//cache : vrai.
+	//switch(){this.mt=1-this.mt;this.renderSansSwitch=0}//EST MAINTENANT APPELLE AUTOMATIQUEMENT, TU DOIS PAS LE FAIRE TOI
+	fill(value){//value : une string bout de fragment shader
+		let out=(this.dim==1)?"float":(this.dim==2)?"vec2":"vec4"
+		let fs=`
+		out ${out} k;
+		void main(){
+			ivec2 pos=ivec2(gl_FragCoord.xy);
+			k=${value};
+		}`
+		new Action(fs,[]).apply(this,{})
+	}
+}
+function getTexel(x,y,tex,type=gl.FLOAT){
+	let fb=gl.createFramebuffer()
+	gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fb);
+   let data = (type==gl.FLOAT)?new Float32Array(4):new Int8Array(4);
+	gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+	gl.readPixels(x, y, 1, 1, gl.RGBA, type, data);//remplacer par gl.RGBA au besoin
+	return [data[0],data[1],data[2],data[3]]///ATTENTION SEULEMENT RED
+}
+function setTexels(tex,x0,y0,w,h,data,format=gl.RGBA,type=gl.FLOAT){//zone rectangulaire
+gl.bindTexture(gl.TEXTURE_2D, tex);
+	gl.texSubImage2D(gl.TEXTURE_2D,0,x0,y0,w,h,format,type,data)
+}
+function fillTex(f,tex,internalFormat=gl.RGB16F,format=gl.RGB,type=gl.FLOAT){
+	let data=new Array(width*height)
+	lop((x,y,i)=>{data[i]=f(x,y,i)})
+	if(type==gl.FLOAT) data=new Float32Array(data)
+	if(type==gl.UNSIGNED_BYTE) data=new Uint8Array(data)
+	if(type==gl.BYTE) data=new Int8Array(data)
+	
+	gl.bindTexture(gl.TEXTURE_2D, tex);
+	gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, width, height, 0,format,type, data);
+}
+function lop(f){
+	let i=0
+	for(let y=0;y<height;y++){
+		for(let x=0;x<width;x++) f(x,y,i++)
+	}
+}
+function getTexel(x,y,tex,type=gl.FLOAT){
+	let fb=gl.createFramebuffer()
+	gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fb);
+   let data = (type==gl.FLOAT)?new Float32Array(4):new Int8Array(4);
+	gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+	gl.readPixels(x, y, 1, 1, gl.RGBA, type, data);//remplacer par gl.RGBA au besoin
+	return [data[0],data[1],data[2],data[3]]///ATTENTION SEULEMENT RED
+}
+//INITIALISATION
+class Fluid{
+	constructor(){
+		this.col=new Tex(3)
+		this.vit=new Tex(2)
+		this.bar=createTex(width,height,gl.R8I,gl.RED_INTEGER,gl.BYTE)
+		this.dim=[width,height]
+		this.div=new Tex(1,0)
+		this.pressure=new Tex(1)
+		this.time=0
+		this.renderMode="ink"
+		this.renderers={
+			ink:new Action(`
+			uniform sampler2D col;
+			uniform lowp isampler2D bar;
+			out vec4 k;
+			bool isbar(ivec2 pos){return texelFetch(bar,pos,0).x>1;}
+			void main(){
+				ivec2 pos=ivec2(gl_FragCoord.xy);
+				vec4 normal=texelFetch(col,pos,0);//vec4(inu,inu,inu,1.0);//texelFetch(col,pos,0) pour la couleur
+				k=isbar(pos)?vec4(0.5,0.5,0.5,1.0):normal;
+			}
+			`,["sampler2D col","isampler2D bar","sampler2D vit","sampler2D p"])
+			,curl:new Action(`
+			uniform lowp isampler2D bar;
+			uniform sampler2D vit;
+			out vec4 k;
+			bool isbar(ivec2 pos){return texelFetch(bar,pos,0).x>1;}
+			void main(){
+				ivec2 pos=ivec2(gl_FragCoord.xy);
+				float curl=texelFetch(vit,pos+ivec2(1,0),0).y-texelFetch(vit,pos+ivec2(-1,0),0).y+texelFetch(vit,pos+ivec2(0,1),0).x-texelFetch(vit,pos+ivec2(0,-1),0).x;
+				float inu=smoothstep(-0.5,0.5,curl);
+				k=isbar(pos)?vec4(1.0,1.0,1.0,1.0):vec4(inu,inu,inu,1.0);
+			}
+			`,["isampler2D bar","sampler2D vit","sampler2D col","sampler2D p"])
+			,vit:new Action(`
+			uniform lowp isampler2D bar;
+			uniform sampler2D vit;
+			out vec4 k;
+			bool isbar(ivec2 pos){return texelFetch(bar,pos,0).x>1;}
+			void main(){
+				ivec2 pos=ivec2(gl_FragCoord.xy);
+				vec2 v=texelFetch(vit,pos,0).xy;
+				float inu=smoothstep(0.0,3.0,v.x*v.x+v.y*v.y);
+				k=isbar(pos)?vec4(1.0,1.0,1.0,1.0):vec4(inu,inu,inu,1.0);
+			}
+			`,["isampler2D bar","sampler2D vit","sampler2D col","sampler2D p"])
+			,pression:new Action(`
+			uniform lowp isampler2D bar;
+			uniform sampler2D p;
+			uniform sampler2D vit;
+			out vec4 k;
+			bool isbar(ivec2 pos){return texelFetch(bar,pos,0).x>1;}
+			void main(){
+				ivec2 pos=ivec2(gl_FragCoord.xy);
+				float inu=smoothstep(-1.0,1.0,-texelFetch(p,pos,0).x);
+				k=isbar(pos)?vec4(1.0,1.0,1.0,1.0):vec4(inu,inu,inu,1.0);
+			}
+			`,["isampler2D bar","sampler2D vit","sampler2D col","sampler2D p"])
+		}
+		
+		this.moveTex=new Action(`
+		uniform sampler2D tex;
+		uniform sampler2D field;
+		uniform ivec2 dim;
+		uniform lowp isampler2D bar;
+		out vec4 k;
+		
+		ivec2 ux=ivec2(1,0);
+		ivec2 uy=ivec2(0,1);
+		
+		bool isbar(ivec2 pos){return texelFetch(bar,pos,0).x>1;}
+		ivec2 md(ivec2 a){return ivec2((a.x+dim.x)%dim.x,(a.y+dim.y)%dim.y);}//mod par dimension
+		vec4 fetch(sampler2D tex,ivec2 pos){return texelFetch(tex,md(pos),0);}
+		vec4 neiFetch(sampler2D tex,vec2 pos){
+			ivec2 inu=ivec2(floor(pos));
+			vec4 nw=fetch(tex,inu);
+			vec4 ne=fetch(tex,inu+ux);
+			vec4 se=fetch(tex,inu+ux+uy);
+			vec4 sw=fetch(tex,inu+uy);
+			vec2 inu2=fract(pos);
+			return (nw*(1.0-inu2.x)+ne*inu2.x)*(1.0-inu2.y)+(sw*(1.0-inu2.x)+se*inu2.x)*inu2.y;
+		}
+		void main(){
+			ivec2 pos=ivec2(gl_FragCoord.xy);
+			k=neiFetch(tex,vec2(pos)-fetch(field,pos).xy);//attention doit tronquer pos (tkt)
+		}
+		`,["sampler2D tex","sampler2D field","ivec2 dim"])
+		this.addInk=new Action(`
+		uniform sampler2D col;//self
+		uniform int t;
+		out vec4 k;
+		int c(int a){return a*a;}
+		void main(){
+			ivec2 pos=ivec2(gl_FragCoord.xy);
+			bool gauche=pos.x<2;
+			k=gauche?((t%60<5 || pos.y%60<5)?vec4(1.0):vec4(0.0,0.0,0.0,1.0)):texelFetch(col,pos,0);
+		}
+		`,["sampler2D col","int t"])
+		this.extForces=new Action(`
+		uniform sampler2D vit;//self
+		uniform lowp isampler2D bar;
+		uniform ivec2 mouse;
+		out vec2 k;
+		int c(int a){return a*a;}
+		void main(){
+			ivec2 pos=ivec2(gl_FragCoord.xy);
+			bool condBoundary=(pos.x<3);
+			k=condBoundary?vec2(1.0,0.0):texelFetch(vit,pos,0).xy;
+		}
+		`,["sampler2D vit","isampler2D bar","ivec2 mouse"])
+		this.calcDiv=new Action(`
+		uniform sampler2D vit;
+		uniform lowp isampler2D bar;
+		uniform ivec2 dim;
+		out float k;
+		bool isbar(ivec2 pos){return texelFetch(bar,pos,0).x>1;}
+		ivec2 md(ivec2 a){return ivec2((a.x+dim.x)%dim.x,(a.y+dim.y)%dim.y);}//mod par dimension
+		vec2 fetch(ivec2 pos){return texelFetch(vit,md(pos),0).xy;}
+		vec2 drond(ivec2 pos,ivec2 dir){//  dU/db
+			bool a=isbar(pos-dir);
+			bool b=isbar(pos+dir);
+			return (a&&b)?vec2(0.0,0.0):a?fetch(pos+dir)-fetch(pos):b?fetch(pos)-fetch(pos-dir):0.5*(fetch(pos+dir)-fetch(pos-dir));
+		}
+		void main(){
+			ivec2 pos=ivec2(gl_FragCoord.xy);
+			k=isbar(pos)?0.0:(drond(pos,ivec2(1,0)).x+drond(pos,ivec2(0,1)).y);//simple calcul de divergence
+		}`
+		,["sampler2D vit","ivec2 dim","isampler2D bar"])
+		//JACOBI
+		this.stepPressure=new Action(`
+		uniform sampler2D p;//self
+		uniform sampler2D div;
+		uniform lowp isampler2D bar;
+		uniform ivec2 dim;
+		out float k;
+		
+		ivec2 ux=ivec2(1,0);
+		ivec2 uy=ivec2(0,1);
+		
+		ivec2 md(ivec2 a){return ivec2((a.x+dim.x)%dim.x,(a.y+dim.y)%dim.y);}//mod par dimension
+		bool isbar(ivec2 pos){return texelFetch(bar,pos,0).x>1;}
+		float fetch(ivec2 pos,sampler2D tex,float def){
+			ivec2 p2=md(pos);
+			return isbar(p2)?def:texelFetch(tex,p2,0).x;
+		}
+		void main(){
+			ivec2 pos=ivec2(gl_FragCoord.xy);
+			float myp=fetch(pos,p,0.0);
+			k=isbar(pos)?0.0:0.25*(fetch(pos,div,0.0)+fetch(pos+ux,p,myp)+fetch(pos-ux,p,myp)+fetch(pos+uy,p,myp)+fetch(pos-uy,p,myp));
+		}
+		`,["sampler2D div","sampler2D p","ivec2 dim","isampler2D bar"])
+		this.addGradPressure=new Action(`
+		uniform sampler2D p;
+		uniform sampler2D vit;//self
+		uniform lowp isampler2D bar;
+		uniform ivec2 dim;
+		out vec2 k;
+		
+		ivec2 ux=ivec2(1,0);
+		ivec2 uy=ivec2(0,1);
+		
+		bool isbar(ivec2 pos){return texelFetch(bar,pos,0).x>1;}
+		ivec2 md(ivec2 a){return ivec2((a.x+dim.x)%dim.x,(a.y+dim.y)%dim.y);}//mod par dimension
+		float fetch(ivec2 pos){return texelFetch(p,md(pos),0).x;}
+		float drond(ivec2 pos,ivec2 dir){
+			return 0.5*(fetch(pos+dir)-fetch(pos-dir));
+		}
+		void main(){
+			ivec2 pos=ivec2(gl_FragCoord.xy);
+			vec2 cur=texelFetch(vit,pos,0).xy;
+			bool cx=isbar(pos+ux) || isbar(pos-ux);
+			bool cy=isbar(pos+uy) || isbar(pos-uy);
+			k=isbar(pos)?vec2(0.0):vec2(cx?0.0:cur.x+drond(pos,ux),cy?0.0:cur.y+drond(pos,uy));
+		}
+		`,["sampler2D vit","sampler2D p","ivec2 dim","isampler2D bar"])
+		this.init()
+	}
+	init(){
+		this.col.fill("vec4(0.0,((pos.y%40<20)^^(pos.x%40<20))?0.5:0.2,0.0,1.0)")
+		this.vit.fill("vec2(1.0,0.0)")
+		this.fillBarrieres()
+		this.aff()
+	}
+	actu(a){
+		this.addInk.apply(this.col,{col:this.col,t:this.time++})
+		this.moveTex.apply(this.col,{tex:this.col,field:this.vit,dim:this.dim})
+		
+		this.moveTex.apply(this.vit,{tex:this.vit,field:this.vit,dim:this.dim})//"advection"
+		//external forces
+		this.extForces.apply(this.vit,{vit:this.vit,bar:{cache:this.bar},mouse:[Math.round(mouse.x),Math.round(mouse.y)]})
+		if(a) this.aff()
+
+		this.calcDiv.apply(this.div,{vit:this.vit,dim:this.dim,bar:{cache:this.bar}})
+		//this.pressure.fill("0.0")
+		for(let k=0;k<10;k++){
+			this.stepPressure.apply(this.pressure,{p:this.pressure,dim:this.dim,div:this.div,bar:{cache:this.bar}})
+		}
+		this.addGradPressure.apply(this.vit,{p:this.pressure,vit:this.vit,dim:this.dim,bar:{cache:this.bar}})
+	}
+	aff(){
+		console.log(this.renderMode)
+		this.renderers[this.renderMode].apply(undefined,{col:this.col,bar:{cache:this.bar},vit:this.vit,p:this.pressure},1)
+	}
+	fillBarrieres(){
+		fillTex((x,y)=>{return [2*getBar(x,y)] },this.bar,gl.R8I,gl.RED_INTEGER,gl.BYTE)
+	}
+	setBarriere(x,y,state){
+		if(x>=0 && y>=0 && x<width && y<height){
+			setTexels(this.bar,x,y,1,1,new Int8Array([state]),gl.RED_INTEGER,gl.BYTE)
+			//console.log(getTexel(x,y,this.bar,gl.BYTE))
+		}
+	}
+}
+function getBar(x,y){
+	return y==0 || y==height-1 || x==0//x==100//x==0 || y==0
+	//(x-230)**2+(y-180)**2<10**2
+}
+
+
+let F=new Fluid()
+
+let go=0
+let fps=0
+function main(){
+	fps++
+	for(let i=0;i<1;i++) F.actu(!i)
+	
+	console.log(mouseDown)
+	if(mouseDown){
+		let d=Math.sqrt((mouse.x-lastMouse.x)**2+(mouse.y-lastMouse.y)**2)
+		let u=[mouse.x-lastMouse.x,mouse.y-lastMouse.y]
+		if(d==0) d=0.001
+		for(let i=0;i<=d;i++){
+			F.setBarriere(Math.round(u[0]/d*i)+lastMouse.x,lastMouse.y+Math.round(u[1]/d*i),2)
+			F.setBarriere(Math.round(u[0]/d*i)+lastMouse.x+1,lastMouse.y+Math.round(u[1]/d*i),2)
+		}
+	}
+	
+		document.getElementById("inu").innerHTML=go?"O":"×"
+
+	if(!go) return
+	window.requestAnimationFrame(main)
+}
+calcFps()
+function calcFps(){
+	document.getElementById("fps").innerHTML='fps : '+fps*2
+	
+	fps=0
+	setTimeout(calcFps,500)
+}
+</script>
+</body>   
+</html>

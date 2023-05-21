@@ -1,0 +1,419 @@
+<!DOCTYPE html><html>
+<body style=background-color:darkgrey; >
+<center><canvas id="canvas" style="background-color:purple;" width=1024 height=512></canvas><br/><div id="inu"></div><div id="fps"></div>
+</center>
+<script>
+let keysDown={}
+document.onkeydown=e=>{keysDown[e.key]=1;if(e.key=="x" && (go=!go)) main()}
+document.onkeyup=e=>{keysDown[e.key]=undefined}
+function copy(e){return JSON.parse(JSON.stringify(e))}
+const vs=`#version 300 es
+in vec4 pos;
+void main(){
+	gl_Position=pos;
+}`
+const canvas=document.getElementById("canvas")
+const gl=canvas.getContext("webgl2")
+gl.getExtension('EXT_color_buffer_float');//pour pouvoir render des textures float IMPORTANT c'était dur à trouver
+const globalFramebuffer=gl.createFramebuffer()
+const globalVertex=createShader(gl, gl.VERTEX_SHADER, vs);
+const gposBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, gposBuffer);
+const globalPos=[		-1, -1,		-1, 1,		1, 1,		-1,-1,		1,1,		1,-1];
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(globalPos), gl.STATIC_DRAW);
+
+
+const width=1000
+const height=700
+document.getElementById("canvas").setAttribute("width",width)
+document.getElementById("canvas").setAttribute("height",height)
+
+
+function createShader(gl, type, source) {
+  var shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  var success = gl.getShaderParameter(shader, gl.COMPILE_STATUS);
+  if (success) return shader;
+  console.log(gl.getShaderInfoLog(shader));  // eslint-disable-line
+  gl.deleteShader(shader);
+  return undefined;
+}
+function createProgram(gl, vertexShader, fragmentShader) {
+  var program = gl.createProgram();
+  gl.attachShader(program, vertexShader);
+  gl.attachShader(program, fragmentShader);
+  gl.linkProgram(program);
+  var success = gl.getProgramParameter(program, gl.LINK_STATUS);
+  if (success) return program;
+  console.log(gl.getProgramInfoLog(program));  // eslint-disable-line
+  gl.deleteProgram(program);
+  return undefined;
+}
+function createTex(w,h,internalFormat=gl.R16F,format=gl.RED,type=gl.FLOAT){//combinaisons : https://www.khronos.org/registry/webgl/specs/latest/2.0/#TEXTURE_TYPES_FORMATS_FROM_DOM_ELEMENTS_TABLE
+	let tex=gl.createTexture()
+	gl.bindTexture(gl.TEXTURE_2D,tex)
+	gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat,w, h, 0,format, type, null);
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+	return tex
+}
+class Action{// action Fragment shader
+/*note avant d'utliser ces modules : 
+- attention aux précisions des textures (defaut float16, chcngeable dans Tex.args)
+- attention aux précisions dans les shaders (defaut lowp float, changeable dans les arguments de Action.constructor)
+- precision sur le systeme cache/target : si pas besoin de render une texture sur elle-meme, donner self=0 dans la création de new Tex()
+
+*/
+	constructor(fs,args,prec="lowp"){//ex args : ["sampler2D tex1","sampler2D tex2", "float inu","sampler2D self"]
+		this.args={}
+		this.nargs=args.length
+		for(let i=0;i<args.length;i++) this.args[args[i].split(" ")[1]]=args[i].split(" ")[0]
+		this.fs="#version 300 es\nprecision "+prec+" float;\n"+fs
+		console.log(this.fs)
+		this.fragmentShader=createShader(gl,gl.FRAGMENT_SHADER,this.fs)
+		this.prog=createProgram(gl,globalVertex,this.fragmentShader);
+		this.posLocation=gl.getAttribLocation(this.prog,"pos")
+		this.uniLoc={}
+		for(let i in this.args){
+			this.uniLoc[i]=gl.getUniformLocation(this.prog,i)
+			if(this.uniLoc[i]===null) console.warn("anntention null uniform location (peut indiquer qu'il n'est pas utilisé dans le shader) : ",i)
+		}
+	}
+	apply(target,args,toCanvas=false){//target : une Tex avec un framebuffer ==== {width:int,height:int,target:glTEXTURE2D}
+		gl.enableVertexAttribArray(this.posLocation);
+		gl.vertexAttribPointer(this.posLocation, 2, gl.FLOAT, false, 0,0);
+		gl.viewport(0, 0, toCanvas?gl.canvas.width:target.width, toCanvas?gl.canvas.height:target.height);
+		gl.useProgram(this.prog);
+		//set args
+		let nTex=0
+		for(let i in this.args){
+			if(args[i]===undefined)console.warn("argument missing : ",i)
+		
+			let curtype=this.args[i]
+			if(curtype=="int[]"){
+				gl.uniform1iv(this.uniLoc[i],args[i])
+			}else if(curtype=="mat4[]"){
+				gl.uniformMatrix4fv(this.uniLoc[i],false,args[i])
+			}else if(curtype=="mat3[]"){
+				gl.uniformMatrix3fv(this.uniLoc[i],false,args[i])
+			}else if(curtype=="vec3[]"){
+				gl.uniform3fv(this.uniLoc[i],args[i])
+			}else if(curtype=="float[]"){
+				gl.uniform1fv(this.uniLoc[i],args[i])
+			}else if(this.args[i]=="sampler2D" || this.args[i]=="isampler2D"){
+				gl.activeTexture(gl.TEXTURE0+nTex)
+				if(!args[i].cache) throw "pas bon argument "+i
+				gl.bindTexture(gl.TEXTURE_2D, args[i].cache);
+				gl.uniform1i(this.uniLoc[i], nTex);
+				nTex++
+			}else if(this.args[i]=="float"){
+				gl.uniform1f(this.uniLoc[i],args[i])
+			}else if(this.args[i]=="ivec2"){//pour les dims
+				gl.uniform2i(this.uniLoc[i],args[i][0],args[i][1])
+			}else if(this.args[i]=="vec2"){
+				gl.uniform2f(this.uniLoc[i],args[i][0],args[i][1])
+			}else if(this.args[i]=="vec3"){
+				gl.uniform3f(this.uniLoc[i],args[i][0],args[i][1],args[i][2])
+			}else if(this.args[i]=="ivec3"){
+				gl.uniform3i(this.uniLoc[i],args[i][0],args[i][1],args[i][2])
+			}else if(this.args[i]=="int"){
+				gl.uniform1i(this.uniLoc[i],args[i])
+			}else if(this.args[i]=="mat4"){
+				gl.uniformMatrix4fv(this.uniLoc[i],false,args[i])////DOIT ETRE UNE LISTE DE FLOAT DE 4*4 CASES
+			}else if(this.args[i]=="mat3"){
+				gl.uniformMatrix3fv(this.uniLoc[i],false,args[i])////DOIT ETRE UNE LISTE DE FLOAT DE 4*4 CASES
+			}else{
+				throw "type pas connu "+this.args[i]
+			}
+		}
+		gl.bindFramebuffer(gl.FRAMEBUFFER,toCanvas?null:globalFramebuffer)
+		if(!toCanvas) gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, target.target, 0);//ATTENTION LE TARGET DOIT AVOIR UNE PROPRIETE target POUR LA CIBLE.
+		if(toCanvas){
+			gl.clearColor(0,0,0, 1);   // clear to black
+			gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+		}else{
+			gl.clearColor(0, 0, 0, 0);
+			gl.clear(gl.COLOR_BUFFER_BIT);
+		}
+		gl.drawArrays(gl.TRIANGLES, 0, 6);
+		
+		if(!toCanvas && target.isClassTex && target.self) target.mt=1-target.mt
+
+	}
+}
+class Tex{
+	static args=[-1,{internalFormat:gl.R16F,format:gl.RED,type:gl.HALF_FLOAT},{internalFormat:gl.RG16F,format:gl.RG,type:gl.HALF_FLOAT},{internalFormat:gl.RGBA16F,format:gl.RGBA,type:gl.HALF_FLOAT}]
+	constructor(dim=1,self=1,w=width,h=height){///SELF : 1 si on peut auto-render sinon 0 pour opti ; HALF:1 si float16 au l
+		this.width=w
+		this.height=h
+		this.dim=dim
+		this.isClassTex=1
+		this.self=self
+		this.tex=this.self?[createTex(w,h,Tex.args[dim].internalFormat,Tex.args[dim].format,Tex.args[dim].type),createTex(w,h,Tex.args[dim].internalFormat,Tex.args[dim].format,Tex.args[dim].type)]:createTex(w,h,Tex.args[dim].internalFormat,Tex.args[dim].format,Tex.args[dim].type)
+		this.mt=0
+		this.renderSansSwitch=0
+	}
+	get target(){///faux : sur lequel on render
+		//if(this.renderSansSwitch++>1) console.warn("attention ptet que t'as pas switch "+this.renderSansSwitch)
+		return this.self?this.tex[this.mt]:this.tex;
+	}
+	get cache(){return this.self?this.tex[1-this.mt]:this.tex}//cache : vrai.
+	//switch(){this.mt=1-this.mt;this.renderSansSwitch=0}//EST MAINTENANT APPELLE AUTOMATIQUEMENT, TU DOIS PAS LE FAIRE TOI
+	fill(value){//value : une string bout de fragment shader
+		let out=(this.dim==1)?"float":(this.dim==2)?"vec2":"vec4"
+		let fs=`
+out ${out} k;
+void main(){
+ivec2 pos=ivec2(gl_FragCoord.xy);
+k=${value};
+}`
+		new Action(fs,[]).apply(this,{})
+	}
+}
+function getTexel(x,y,tex,type=gl.FLOAT){
+	let fb=gl.createFramebuffer()
+	gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fb);
+   let data = (type==gl.FLOAT)?new Float32Array(4):new Int8Array(4);
+	gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+	gl.readPixels(x, y, 1, 1, gl.RGBA, type, data);//remplacer par gl.RGBA au besoin
+	return [data[0],data[1],data[2],data[3]]///ATTENTION SEULEMENT RED
+}
+function setTexels(tex,x0,y0,w,h,data,format=gl.RGBA,type=gl.FLOAT){//zone rectangulaire
+gl.bindTexture(gl.TEXTURE_2D, tex);
+	gl.texSubImage2D(gl.TEXTURE_2D,0,x0,y0,w,h,format,type,data)
+}
+function fillTex(f,tex,internalFormat=gl.RGB16F,format=gl.RGB,type=gl.FLOAT){
+	let data=new Array(width*height)
+	lop((x,y,i)=>{data[i]=f(x,y,i)})
+	if(type==gl.FLOAT) data=new Float32Array(data)
+	if(type==gl.UNSIGNED_BYTE) data=new Uint8Array(data)
+	if(type==gl.BYTE) data=new Int8Array(data)
+	
+	gl.bindTexture(gl.TEXTURE_2D, tex);
+	gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, width, height, 0,format,type, data);
+}
+function lop(f){
+	let i=0
+	for(let y=0;y<height;y++){
+		for(let x=0;x<width;x++) f(x,y,i++)
+	}
+}
+function getTexel(x,y,tex,type=gl.FLOAT){
+	let fb=gl.createFramebuffer()
+	gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fb);
+   let data = (type==gl.FLOAT)?new Float32Array(4):new Int8Array(4);
+	gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+	gl.readPixels(x, y, 1, 1, gl.RGBA, type, data);//remplacer par gl.RGBA au besoin
+	return [data[0],data[1],data[2],data[3]]///ATTENTION SEULEMENT RED
+}
+function matrixId(n=3){
+	return createMat(n,n,(x,y)=>1*(x==y))
+}
+function createMat(w=3,h=3,f=(x,y)=>1*(x==y)){
+	let rep;
+	(rep=[]).length=w*h
+	for(let x=0;x<w;x++){
+		for(let y=0;y<h;y++)rep[x+w*y]=f(x,y)
+	}
+	return rep;
+}
+const createMatrix=createMat
+function matFromVecs(a,b,c){
+	let l=[a,b,c]
+	return createMat(3,3,(x,y)=>l[x][y])
+}
+function rotationMatrix(x,y,z,a){
+	let d=Math.sqrt(x*x+y*y+z*z)
+	x/=d
+	y/=d
+	z/=d
+	a=-a/// bidouille car on doit donner les coords colonne par colonne, et pas dans l'ordre de wikipedia (ligne par ligne)
+	let c=1-Math.cos(a)
+	let s=Math.sin(a)
+	return [1-c+x*x*c,x*y*c-z*s,x*z*c+y*s,x*y*c+z*s,1-c+y*y*c,y*z*c-x*s,z*x*c-y*s,z*y*c+x*s,1-c+z*z*c]
+}
+function matrixMult(a,b){///3*3 les deux
+	return createMat(3,3,(x,y)=>{let s=0;for(let i=0;i<3;i++){s+=a[y*3+i]*b[x*3+i]}return s})
+}
+class Obj{
+	constructor(shape=0, couleur=[1,0,0], coeffCouleur=0.5, rot=matrixId(3), trans=[0,0,0]){
+		this.shape=[shape]
+		this.couleur=couleur
+		this.coeffCouleur=[coeffCouleur]
+		this.rot=rot
+		this.trans=trans
+		
+	}
+}
+class Renderer{
+	constructor(NOBJS){
+		this.dim=[width,height]
+		this.w=width
+		this.h=height
+		this.prefx=new Tex(3,0)
+		this.NOBJS=NOBJS
+		this.render=new Action(`
+			struct intTime{//pour comparer les temps
+				float t;int i;vec3 u;
+			};
+			uniform mat3 cam;////angle de cam
+			uniform vec3 campos;
+			uniform vec2 dim;
+			uniform int MAXBOUNCE;
+			uniform int shape[${NOBJS}];//type de la shape de l'objet
+			uniform vec3 couleur[${NOBJS}];///couleur de l'objet
+			uniform float coeffCouleur[${NOBJS}];////de 0.0 à 1.0 : 0.0 si miroir parfait , 1.0 si opaque parfait
+			uniform mat3 rot[${NOBJS}];////rotation de l'objet
+			uniform vec3 trans[${NOBJS}];///translation de l'objet
+			
+			out vec3 k;
+			intTime getIntVirtuel(vec3 u,vec3 p, int s){
+				if(s==0){//PLAN INFINI HORIZONTAL
+					float t=-p.y/u.y;
+					return intTime(t,-1,vec3(0.0,1.0,0.0));
+				}else if(s==1){////SPERE EN 0,0,0 DE RAYON 1
+					float d1=dot(u,-p);
+					vec3 mid=p+u*d1;
+					float d2=1.0-dot(mid,mid);
+					if(d2<0.0) return intTime(-1.0,-1,vec3(42.0));
+					float d3=sqrt(d2);
+					float d4=d1-d3;
+					float t=(d4>0.0)?d4:(d1+d3);
+					return intTime(t,-1,normalize(u*t+p));
+				}else if(s==2){//CARRE DE RAYON 1 HORIZONTAL
+					float t=-p.y/u.y;
+					vec3 w=p+u*t;
+					return intTime((abs(w.x)<1.0 && abs(w.z)<1.0)?t:-1.0,-1,vec3(0.0,1.0,0.0));
+				}else if(s==3){///disque de rayon 1 horizontal au centre
+					float t=-p.y/u.y;
+					vec3 w=p+u*t;
+					return intTime((dot(w,w)<1.0)?t:-1.0,-1,vec3(0.0,1.0,0.0));
+				}else{//PROBLEME, PAS CONNU
+					return intTime(-1.0,-1,vec3(42.0));
+				}
+			}
+			intTime getInt(vec3 u,vec3 p, int i){
+				mat3 m=rot[i];/////OPTIMISABLE EN STOCKANT LES INVERSES DE MATRICES
+				mat3 mt=transpose(m);//transpose car :https://en.wikipedia.org/wiki/Normal_(geometry)#Calculating_a_surface_normal (trucs bizarres)
+				///en fait je sais pas trop pourquoi ca marche, mais ca marche (jai échangé les matrices au pif)
+				mat3 minv=inverse(m);
+				mat3 mtinv=transpose(minv);
+				vec3 dx=trans[i];
+				vec3 u2=mtinv*u;// /f;
+				vec3 p2=mtinv*(p-dx);// /f;
+				
+				float factor=length(u2);//a l'air correct
+				intTime intermediaire=getIntVirtuel(normalize(u2),p2,shape[i]);
+				
+				intermediaire.t/=factor;
+				intermediaire.u=normalize(minv*intermediaire.u);
+				intermediaire.i=i;
+				
+				return intermediaire;
+				
+			}
+			vec3 getColor(vec3 u,vec3 p,int esp){/////////PROBABLEMENT TRES MAUVAIS SUR CARTE GRAPHIQUE  /!\ OPTIMISABLE BEAUCOUP
+				vec3 rep=vec3(0.0);//VIDE
+				float coeffrep=1.0;///taux de ce qui reste à peindre
+				//bool deja=true;
+				for(int k=0;k<esp;k++){
+					//calcul intersection
+					bool deja=false;
+					intTime min=intTime(-1.0,-1,vec3(0.0,0.0,1.0));
+					for(int i=0;i<${NOBJS};i++){
+						intTime inu=getInt(u,p,i);
+						bool comp=inu.t>0.001 && ((deja && inu.t<min.t) || !deja);
+						if(comp){ min=inu;deja=true;}
+					}
+					if(!deja) return rep;
+					rep+=coeffCouleur[min.i]*couleur[min.i]*coeffrep;
+					coeffrep*=1.0-coeffCouleur[min.i];
+					
+					p=p+u*min.t;
+					u=u-min.u*2.0*dot(min.u,u); ///réflexion
+					
+				}
+				return rep;
+			}
+			void main(){
+				vec2 posxy=(gl_FragCoord.xy-dim/2.0)/dim.x;//-vec2(gl_FragCoord.x-dim.x/2.0,dim.y/2.0-gl_FragCoord.y)/dim.x;
+				vec3 u0=normalize(cam * vec3(posxy.x,posxy.y,1.0));
+				k=getColor(u0,campos,MAXBOUNCE);
+				
+			}
+		`,["mat3 cam","vec3 campos","vec2 dim","int MAXBOUNCE","int[] shape","vec3[] couleur","float[] coeffCouleur","mat3[] rot","vec3[] trans"])
+		this.fx=new Action(`
+			uniform sampler2D prefx;
+			out vec4 k;
+			void main(){
+				
+				ivec2 pos=ivec2(gl_FragCoord.xy);
+				vec3 inu=texelFetch(prefx,pos,0).xyz;
+				k=vec4(inu.x,inu.y,inu.z,1.0);
+			}
+		`,["sampler2D prefx"])
+	}
+	aff(lobj=this.lobj){
+	
+		this.render.apply(this.prefx,{cam:CAMMATRIX,campos:campos,dim:this.dim,MAXBOUNCE:4,...OBJS})
+		this.fx.apply(undefined,{prefx:this.prefx},true)
+	}
+}
+let go=0
+
+let campos=[1,0.5,-5]
+let alpha=0
+let beta=0
+let CAMMATRIX=createMat();
+
+let inu=[new Obj(),new Obj(0,[0,1,0],0.5,rotationMatrix(0,0,1,Math.PI/2*1)),new Obj(1,[0.2,0.2,1],0.7,matrixId(),[1.5,1.5,8]),new Obj(2,[1,1,1],0.5,matrixMult(rotationMatrix(0,0,1,0.2),[2,0,0,0,1,0,1,0,1]),[2.5,2,5]),new Obj(1,[1,1,1],0.3,[2,2,0,0,0.5,0,0,0,1.5],[3,1,0]),new Obj(3,[0.5,0.5,0.5],0.5,matrixMult(rotationMatrix(0,1,0,-0.2),matrixMult(rotationMatrix(1,0,0,Math.PI/2*0.9),[5,0,0,0,5,0,0,0,5])),[10,5,15])]
+//,new Obj(1,[1,1,1],0.3,createMatrix(3,3,(x,y)=>((x==y)+(x==y && x==0))),2,[0,0,0])]
+/*for(let i=0;i<5;i++){
+	let r=Math.random()+0.5
+	inu.push(new Obj(1,[Math.random(),Math.random(),Math.random()],Math.random(),createMatrix(3,3,(x,y)=>(r*(x==y))),-42,[Math.random()*10+0.5,Math.random()*3+0.5,Math.random()*10+0.5]))
+}*/
+let OBJS={shape:[],couleur:[],coeffCouleur:[],rot:[],trans:[]}
+for(let i of inu){
+	for(let j in OBJS)OBJS[j]=[...OBJS[j],...i[j]]
+}		
+let rr=new Renderer(inu.length)
+
+rr.aff()
+const da=0.05
+const dx=0.1
+let fpscount=0;
+fps()
+function main(){
+	fpscount++
+	if(keysDown.ArrowLeft) alpha+=da;
+	if(keysDown.ArrowRight) alpha-=da;
+	if(keysDown.ArrowDown) beta-=da;
+	if(keysDown.ArrowUp)beta+=da;
+	CAMMATRIX=matrixMult(rotationMatrix(1,0,0,-beta),rotationMatrix(0,1,0,alpha))
+	
+	let addinu=(n)=>{let k=-(alpha+n*Math.PI/2);campos[0]+=Math.sin(k)*dx;campos[2]+=Math.cos(k)*dx}
+	if(keysDown.q) addinu(1)
+	if(keysDown.d) addinu(3)
+	if(keysDown.s) addinu(2)
+	if(keysDown.z) addinu(0)
+	
+	if(keysDown.a)campos[1]+=dx;
+	if(keysDown.e)campos[1]-=dx;
+	
+	rr.aff()
+	
+	
+	if(!go) return;
+	window.requestAnimationFrame(main)
+}
+function fps(){
+	document.getElementById("fps").innerHTML="fps : "+2*fpscount
+	fpscount=0
+	setTimeout(fps,500)
+}
+</script>
+</body>   
+</html>
