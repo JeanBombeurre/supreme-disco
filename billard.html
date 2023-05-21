@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html>
+	<body>
+		<svg height=500 width=1000 id="svg">
+			<g id="txt">
+			</g>
+			<g id= 'murs' >
+			</g>
+		<g id="z1">
+			</g>
+		</svg>
+		<script>
+			let w=window.innerWidth
+			let h=window.innerHeight
+			let mouseX=0
+			let mouseY=0
+			let ZOOM=1
+			let mc=0
+			document.getElementById("svg").addEventListener("mousemove",e => {mouseX=e.offsetX;mouseY=e.offsetY})
+			document.addEventListener('mousedown',e => {if(mode==0 && go==1){mc=1}},true)
+			
+			document.body.style.backgroundColor = "green";
+			function affP(txt,id){
+				document.getElementById(id).innerHTML+=txt
+			}
+			function aff(txt,id){
+				document.getElementById(id).innerHTML=txt
+			}
+			function circle(x,y,r,c){
+				affP("<circle cx="+(w/2+x*ZOOM)+" cy="+(h/2-y*ZOOM)+" fill="+c+" r="+r*ZOOM+" />",'z1')
+			}
+			function dist(x,y,x2,y2){
+				return Math.sqrt((x-x2)**2+(y-y2)**2)
+			}
+			
+			class Boule{
+				constructor(psX,psY,c){
+					this.r=rayon
+					this.psX=psX
+					this.psY=psY
+					this.c=c
+					this.t=0
+					this.x=0
+					this.y=0
+					this.out=false
+				}
+				aff(){
+					if(this.out==false){
+						circle(this.psX,this.psY,this.r,this.c)
+					}
+				}
+				av(t){
+					this.psX+=this.x*(t-this.t)
+					this.psY+=this.y*(t-this.t)
+					this.t=t
+				}
+				static coll(a,b){
+					if(a.out==false && b.out==false){
+						let pprp=[b.psX-a.psX,b.psY-a.psY]
+						let vprp=[b.x-a.x,b.y-a.y]
+						if(vprp[0]==0 && vprp[1]==0){
+							return false;
+						}
+						let rmax=a.r+b.r
+						let v=dist(0,0,vprp[0],vprp[1])
+						let u=[vprp[0]/v,vprp[1]/v]
+						let u2=[-u[1],u[0]]
+						let sc=pprp[0]*u2[0]+pprp[1]*u2[1]
+						if(Math.abs(sc)<rmax){
+							let sc2=-(pprp[0]*u[0]+pprp[1]*u[1])
+							let diff=Math.sqrt(rmax**2-sc**2)
+							let p1=(sc2-diff)/v
+							let p2=(sc2+diff)/v
+
+							if(Math.abs(p1)<Math.abs(p2)){
+								return p1
+							}else{
+								return p2
+							}
+						}else{
+							return false;
+						}
+					}else{
+						return false
+					}
+				}
+				static boum(a,b){
+					let pprp=[b.psX-a.psX,b.psY-a.psY]
+					let vprp=[b.x-a.x,b.y-a.y]
+					let d=dist(0,0,pprp[0],pprp[1])
+					let u=[pprp[0]/d,pprp[1]/d]
+					let sc=u[0]*vprp[0]+u[1]*vprp[1]
+					b.x-=sc*u[0]/1
+					b.y-=sc*u[1]/1
+					a.x+=sc*u[0]/1
+					a.y+=sc*u[1]/1
+				}
+				static mur(a){
+					if(a.psX>=m.d-0.001 || a.psX<=m.g+0.001){
+						a.x=-a.x*0.8
+					}
+					if(a.psY>=m.h-0.001 || a.psY<=m.b+0.001){
+						a.y=-a.y*0.8
+					}
+				}
+			}
+			
+			document.onkeydown=kd
+			function kd(e){
+				if(e.key=="x"){
+					if(go==0){
+						go=1
+						main()
+						mc=0
+					}else{
+						go=0
+					}
+				}
+			}
+			function affCanne(x,y,ux,uy){
+				let l=300
+				let x1=x-ux*l
+				let y1=y-uy*l
+				affP('<line x1='+(w/2+x1*ZOOM)+' y1='+(h/2-y1*ZOOM)+' x2='+(w/2+x*ZOOM)+' y2='+(h/2-y*ZOOM)+' fill=none stroke=brown stroke-width='+4*ZOOM+' />',"z1")
+				
+			}
+			function affall(){
+				for(let i=0;i<list.length;i++){
+					list[i].aff();
+				}
+			}
+			let mode=0 // 0=vise 1=physique -1=shoot
+			let rayon=15
+			let t=0
+			let dt=3
+			let go=0
+			let slow=0.99
+			let list=[new Boule(-100,0,'white')]
+			let re=32
+			let m={g:-400+rayon,
+				d:400-rayon,
+				h:200-rayon,
+				b:-200+rayon}
+			let mv={g:m.g-rayon,d:m.d+rayon,h:m.h+rayon,b:m.b-rayon}
+			
+			let de=Math.sqrt(re**2-(re/2)**2)
+			for(let i=0;i<5;i++){
+				for(let j=0;j<i+1;j++){
+					list.push(new Boule(i*de+(Math.random()-0.5)/100,(j-(i)/2)*re+(Math.random()-0.5)/100,'blue'))
+				}
+			}
+			affall()
+			function tourColls(max){
+				let colls=[]
+				for(let i=0;i<list.length;i++){
+					for(let j=i;j<list.length;j++){
+						let rep=Boule.coll(list[i],list[j])
+						if(rep){
+							if(rep>=0 && rep<=max){
+								colls.push([i,j,rep])
+							}
+						}
+					}
+				}
+				return colls
+			}
+			function collmurs(max){
+				let g=m.g
+				let d=m.d
+				let h=m.h
+				let b=m.b
+				let rep=[]
+				for(let i=0;i<list.length;i++){
+					if(list[i].out==false){
+						let inu=0;
+						let rx=[]
+						let ry=[]
+						if(list[i].x != 0){
+							inu=(d-list[i].psX)/list[i].x
+							if(inu>=0 && inu<max){
+								rx=[i,inu]
+							}
+							inu=(g-list[i].psX)/list[i].x
+							if(inu>=0 && inu<max){
+								rx=[i,inu]
+							}
+						}
+						if(list[i].y!=0){
+							inu=(h-list[i].psY)/list[i].y
+							if(inu>=0 && inu<max){
+								ry=[i,inu]
+							}
+							inu=(b-list[i].psY)/list[i].y
+							if(inu>=0 && inu<max){
+								ry=[i,inu]
+							}
+						}
+						if(rx.length>0 && ry.length>0){
+							if(rx[1]<ry[1]){
+								rep.push(rx)
+							}else{
+								rep.push(ry)
+							}
+						}else{
+							if(rx.length!=0){
+								rep.push(rx)
+							}
+							if(ry.length!=0){
+								rep.push(ry)
+							}
+						}
+					}
+				}
+				return rep
+			}
+			function boumboum(is){
+				Boule.boum(list[is[1]],list[is[0]])
+			}
+			function actuall(t){
+				for(let i=0;i<list.length;i++){
+					list[i].av(t)
+				}
+			}
+			let count=0
+			let malus=0
+			let trous=[[-385,185],[385,185],[385,-185],[-385,-185]]
+			list[0].x=10
+			list[0].y=2
+			let canne={}
+			function main(){
+				aff("<text x="+w/2+" y="+(h/2-100)+" font-family=Verdana font-size=30 style=fill:yellow >tirs: "+count+"</text>","txt")
+				affP("<text x="+w/2+" y="+(h/2+100)+" font-family=Verdana font-size=30 style=fill:red >malus: "+malus+"</text>","txt")
+				aff('<path d="M'+(w/2+mv.g*ZOOM)+','+(h/2-mv.h*ZOOM)+'L'+(w/2+mv.d*ZOOM)+','+(h/2-mv.h*ZOOM)+'L'+(w/2+mv.d*ZOOM)+','+(h/2-mv.b*ZOOM)+'L'+(w/2+mv.g*ZOOM)+','+(h/2-mv.b*ZOOM)+'Z" fill=none stroke=brown stroke-width=2 />','murs')
+				w=window.innerWidth-10
+				h=window.innerHeight-10
+				aff("","z1")
+				for(let i=0;i<trous.length;i++){
+					circle(trous[i][0],trous[i][1],rayon+5,'black')
+				}
+				for(let i=0;i<list.length;i++){
+					list[i].av(t)
+					list[i].aff()
+				}
+				
+				if(mode==1){
+					ZOOM+=(1.5-ZOOM)/30
+					let ct=t
+					let colls=tourColls(dt)
+					let prev=[-1,-1]
+					let pm=-1
+					let inu=0
+					let collimurs=collmurs(dt)
+					while((colls.length>0 || collimurs.length>0) && inu<100){
+						inu++
+						let min=10
+						let ob=[]
+						colls=tourColls(dt+t-ct)
+						collimurs=collmurs(dt+t-ct)
+						for(let i=0;i<colls.length;i++){
+							if(colls[i][2]<min && !((colls[i][0]==prev[0] && colls[i][1]==prev[1]) || (colls[i][0]==prev[1] && colls[i][1]==prev[0]))){
+								min=colls[i][2]
+								ob=colls[i]
+							}
+						}
+						let minm=100
+						let obm=[]
+						for(let i=0;i<collimurs.length;i++){
+							if(collimurs[i][1]<minm && pm!=collimurs[i][0]){
+								minm=collimurs[i][1]
+								obm=collimurs[i]
+							}
+						}
+						if(min==10 && minm==100){// || ob[2]<0.00001){
+							break;
+						}else{
+							if(min<minm){
+								actuall(ob[2]+ct)
+								boumboum(ob)
+								ct=ob[2]+ct
+								prev=[ob[0],ob[1]]
+							}else{
+								actuall(obm[1]+ct)
+								Boule.mur(list[obm[0]])
+								ct=obm[1]+ct
+								pm=obm[0]
+							}
+
+						}
+					}
+					for(let i=0;i<list.length;i++){
+						list[i].x*=slow
+						list[i].y*=slow
+					}
+
+					t+=dt
+					
+					let rep=true
+					for(let i=0;i<list.length;i++){
+						if(dist(0,0,list[i].x,list[i].y)>0.05){
+							rep=false
+							break;
+						}
+					}
+					if(rep){
+						for(let i=0;i<list.length;i++){
+							list[i].x=0
+							list[i].y=0
+							mode=0
+							if(list[0].out){
+								list[0].x=0
+								list[0].y=0
+								list[0].out=false
+								let rep=true
+								while(rep==true){
+									rep=false;
+									list[0].psX=Math.random()*600-300
+									list[0].psY=Math.random()*300-150
+									for(let i=1;i<list.length;i++){
+										if(dist(list[i].psX,list[i].psY,list[0].psX,list[0].psY)<rayon*2+1){
+											rep=true
+										}
+									}
+								}
+							}
+						}
+					}
+					
+					for(let i=0;i<list.length;i++){
+						for(let j=0;j<trous.length;j++){
+							let d=dist(list[i].psX,list[i].psY,trous[j][0],trous[j][1])
+							if(d<rayon+5){
+								if(i!=0){
+									list[i].out=true
+									list[i].x=0
+									list[i].y=0
+									list[i].psX=-1000
+									list[i].psY=-1000
+								}else{
+									malus++
+									list[i].out=true
+									list[i].x=0
+									list[i].y=0
+									list[i].psX=-1000
+									list[i].psY=-1000
+								}
+							}
+						}
+					}
+				}else if (mode==0){
+					let sx=mouseX-w/2
+					let sy=h/2-mouseY
+					ZOOM+=(1/(Math.sqrt(sx**2+sy**2)/1000+1)-ZOOM)/30
+					let u=[list[0].psX*ZOOM-sx,list[0].psY*ZOOM-sy]
+					let d=dist(0,0,u[0],u[1])
+					u=[u[0]/d,u[1]/d]
+					let vd=d/3+rayon
+					affCanne(list[0].psX-u[0]*vd,list[0].psY-u[1]*vd,u[0],u[1])
+					
+					if(mc==1){
+						mode=-1
+						canne={d:vd,u:u,x:list[0].psX-u[0]*vd,y:list[0].psY-u[1]*vd,v:(d-rayon)/50}
+						mc=0
+					}
+				}else{
+					//mode=-1
+					canne.x+=canne.u[0]*canne.v*2
+					canne.y+=canne.u[1]*canne.v*2
+					affCanne(canne.x,canne.y,canne.u[0],canne.u[1])
+					canne.d-=canne.v*2
+					if(canne.d-canne.v*2<rayon){
+						count++
+						mode=1
+						list[0].x=canne.u[0]*canne.v
+						list[0].y=canne.u[1]*canne.v
+					}
+				}
+				document.getElementById('svg').setAttribute("height", h);
+				document.getElementById('svg').setAttribute("width", w);
+				if(go==1){
+					window.requestAnimationFrame(main)
+				}
+			}
+		</script>
+	</body>
+</html>
